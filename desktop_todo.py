@@ -16,6 +16,22 @@ class DesktopTodoApp:
         self.root.title("桌面待办事项")
         self.root.geometry("400x600")
         
+        # 移除默认标题栏，使用自定义标题栏
+        self.root.overrideredirect(True)
+        
+        # 允许调整窗口大小（需要添加调整边框）
+        self.root.resizable(True, True)
+        
+        # 窗口调整大小相关变量
+        self.resizing = False
+        self.resize_edge = None
+        self.resize_start_x = 0
+        self.resize_start_y = 0
+        self.resize_start_width = 0
+        self.resize_start_height = 0
+        self.resize_start_pos_x = 0
+        self.resize_start_pos_y = 0
+        
         # 设置窗口置顶
         self.root.attributes('-topmost', True)
         
@@ -34,9 +50,12 @@ class DesktopTodoApp:
         self.hide_threshold = 20  # 鼠标离开多少像素后隐藏
         self.close_to_tray = False  # 关闭时是否隐藏到托盘
         self.remember_choice = False  # 是否记住选择
+        self.font_size = 11  # 默认字体大小
         
         # 窗口状态
         self.is_hidden = False
+        self.is_maximized = False
+        self.normal_geometry = None
         self.original_geometry = None
         self.tray_icon = None
         self.is_dragging = False
@@ -45,15 +64,11 @@ class DesktopTodoApp:
         
         # 任务拖拽状态
         self.dragging_task = None
-        self.drag_task_start_y = 0
-        self.drag_placeholder = None
+        self.drag_start_index = -1
         
         # 加载数据和配置
         self.load_data()
         self.load_config()
-        
-        # 隐藏任务栏图标
-        self.root.overrideredirect(False)  # 先保持正常模式
         
         # 创建UI
         self.create_ui()
@@ -65,8 +80,11 @@ class DesktopTodoApp:
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.root.bind("<Configure>", self.on_window_move)
         
-        # 延迟隐藏任务栏图标
-        self.root.after(100, self.hide_from_taskbar)
+        # 绑定调整窗口大小的事件
+        self.root.bind("<Motion>", self.on_mouse_move)
+        self.root.bind("<Button-1>", self.on_mouse_down)
+        self.root.bind("<B1-Motion>", self.on_mouse_drag)
+        self.root.bind("<ButtonRelease-1>", self.on_mouse_up)
         
         # 启动自动隐藏检查（但不自动移到边缘）
         if self.auto_hide_enabled:
@@ -77,23 +95,55 @@ class DesktopTodoApp:
             # 不启动check_auto_hide
     
     def create_ui(self):
-        # 标题栏
-        title_frame = tk.Frame(self.root, bg="#4CAF50", height=50)
-        title_frame.pack(fill=tk.X)
-        title_frame.pack_propagate(False)
+        # 自定义标题栏（最外层）
+        title_bar = tk.Frame(self.root, bg="#2196F3", height=30, relief=tk.RAISED, bd=1)
+        title_bar.pack(side=tk.TOP, fill=tk.X)
+        title_bar.pack_propagate(False)
         
-        title_label = tk.Label(title_frame, text="📝 我的待办事项", 
-                              font=("微软雅黑", 16, "bold"), 
-                              bg="#4CAF50", fg="white")
-        title_label.pack(pady=10)
+        # 标题文本
+        title_label = tk.Label(title_bar, text="桌面待办", 
+                              font=("微软雅黑", 10),
+                              bg="#2196F3", fg="white")
+        title_label.pack(side=tk.LEFT, padx=10)
         
-        # 绑定标题栏拖动事件
-        title_frame.bind("<Button-1>", self.start_drag)
-        title_frame.bind("<B1-Motion>", self.on_drag)
-        title_frame.bind("<ButtonRelease-1>", self.stop_drag)
+        # 绑定标题栏拖动
+        title_bar.bind("<Button-1>", self.start_drag)
+        title_bar.bind("<B1-Motion>", self.on_drag)
+        title_bar.bind("<ButtonRelease-1>", self.stop_drag)
         title_label.bind("<Button-1>", self.start_drag)
         title_label.bind("<B1-Motion>", self.on_drag)
         title_label.bind("<ButtonRelease-1>", self.stop_drag)
+        
+        # 窗口控制按钮（右侧）
+        btn_frame = tk.Frame(title_bar, bg="#2196F3")
+        btn_frame.pack(side=tk.RIGHT, padx=5)
+        
+        # 最小化按钮
+        minimize_btn = tk.Button(btn_frame, text="—", 
+                                command=self.minimize_window,
+                                font=("微软雅黑", 9, "bold"),
+                                bg="#2196F3", fg="white",
+                                relief=tk.FLAT, width=3, cursor="hand2",
+                                activebackground="#1976D2")
+        minimize_btn.pack(side=tk.LEFT, padx=1)
+        
+        # 最大化/还原按钮
+        self.maximize_btn = tk.Button(btn_frame, text="□", 
+                                      command=self.toggle_maximize,
+                                      font=("微软雅黑", 9, "bold"),
+                                      bg="#2196F3", fg="white",
+                                      relief=tk.FLAT, width=3, cursor="hand2",
+                                      activebackground="#1976D2")
+        self.maximize_btn.pack(side=tk.LEFT, padx=1)
+        
+        # 关闭按钮
+        close_btn = tk.Button(btn_frame, text="✕", 
+                             command=self.on_closing,
+                             font=("微软雅黑", 9, "bold"),
+                             bg="#2196F3", fg="white",
+                             relief=tk.FLAT, width=3, cursor="hand2",
+                             activebackground="#f44336")
+        close_btn.pack(side=tk.LEFT, padx=1)
         
         # 设置栏
         settings_frame = tk.Frame(self.root, bg="#f0f0f0")
@@ -156,7 +206,10 @@ class DesktopTodoApp:
         input_frame.pack(fill=tk.X, padx=10, pady=10)
         
         self.task_entry = tk.Entry(input_frame, font=("微软雅黑", 12), 
-                                   relief=tk.FLAT, bd=2)
+                                   relief=tk.SOLID, bd=1, 
+                                   highlightthickness=1,
+                                   highlightbackground="#90CAF9",
+                                   highlightcolor="#64B5F6")
         self.task_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=8)
         self.task_entry.bind("<Return>", lambda e: self.add_task())
         
@@ -182,6 +235,9 @@ class DesktopTodoApp:
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.config(command=self.canvas.yview)
         
+        # 绑定鼠标滚轮事件
+        self.canvas.bind_all("<MouseWheel>", self.on_mousewheel)
+        
         # 在Canvas中创建Frame
         self.todo_container = tk.Frame(self.canvas, bg="white")
         self.canvas_window = self.canvas.create_window((0, 0), 
@@ -205,6 +261,22 @@ class DesktopTodoApp:
     def on_canvas_configure(self, event):
         """调整canvas窗口宽度"""
         self.canvas.itemconfig(self.canvas_window, width=event.width)
+    
+    def on_mousewheel(self, event):
+        """处理鼠标滚轮事件"""
+        # 检查是否按住Ctrl键
+        if event.state & 0x0004:  # Ctrl键被按下
+            # Ctrl+滚轮：调整字体大小
+            if event.delta > 0:
+                self.font_size = min(self.font_size + 1, 20)  # 最大20
+            else:
+                self.font_size = max(self.font_size - 1, 8)   # 最小8
+            
+            self.save_config()
+            self.refresh_todo_list()
+        else:
+            # 普通滚轮：滚动列表
+            self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
     
     def toggle_topmost(self):
         """切换窗口置顶状态"""
@@ -270,6 +342,115 @@ class DesktopTodoApp:
         # 检查是否拖到屏幕边缘
         self.check_edge_snap()
     
+    def on_mouse_move(self, event):
+        """鼠标移动事件 - 检测边缘并改变光标"""
+        if self.resizing or self.is_dragging:
+            return
+        
+        edge = self.get_resize_edge(event.x_root, event.y_root)
+        
+        if edge:
+            # 根据边缘设置光标样式
+            if edge in ['top', 'bottom']:
+                self.root.config(cursor='sb_v_double_arrow')
+            elif edge in ['left', 'right']:
+                self.root.config(cursor='sb_h_double_arrow')
+            elif edge in ['top_left', 'bottom_right']:
+                self.root.config(cursor='size_nw_se')
+            elif edge in ['top_right', 'bottom_left']:
+                self.root.config(cursor='size_ne_sw')
+        else:
+            self.root.config(cursor='')
+    
+    def on_mouse_down(self, event):
+        """鼠标按下事件"""
+        edge = self.get_resize_edge(event.x_root, event.y_root)
+        
+        if edge:
+            self.resizing = True
+            self.resize_edge = edge
+            self.resize_start_x = event.x_root
+            self.resize_start_y = event.y_root
+            self.resize_start_width = self.root.winfo_width()
+            self.resize_start_height = self.root.winfo_height()
+            self.resize_start_pos_x = self.root.winfo_x()
+            self.resize_start_pos_y = self.root.winfo_y()
+    
+    def on_mouse_drag(self, event):
+        """鼠标拖动事件"""
+        if not self.resizing:
+            return
+        
+        dx = event.x_root - self.resize_start_x
+        dy = event.y_root - self.resize_start_y
+        
+        new_width = self.resize_start_width
+        new_height = self.resize_start_height
+        new_x = self.resize_start_pos_x
+        new_y = self.resize_start_pos_y
+        
+        # 最小尺寸限制
+        min_width = 300
+        min_height = 400
+        
+        if 'right' in self.resize_edge:
+            new_width = max(min_width, self.resize_start_width + dx)
+        elif 'left' in self.resize_edge:
+            new_width = max(min_width, self.resize_start_width - dx)
+            if new_width > min_width:
+                new_x = self.resize_start_pos_x + dx
+        
+        if 'bottom' in self.resize_edge:
+            new_height = max(min_height, self.resize_start_height + dy)
+        elif 'top' in self.resize_edge:
+            new_height = max(min_height, self.resize_start_height - dy)
+            if new_height > min_height:
+                new_y = self.resize_start_pos_y + dy
+        
+        self.root.geometry(f"{int(new_width)}x{int(new_height)}+{int(new_x)}+{int(new_y)}")
+    
+    def on_mouse_up(self, event):
+        """鼠标释放事件"""
+        if self.resizing:
+            self.resizing = False
+            self.resize_edge = None
+            self.root.config(cursor='')
+    
+    def get_resize_edge(self, x, y):
+        """检测鼠标是否在窗口边缘"""
+        win_x = self.root.winfo_x()
+        win_y = self.root.winfo_y()
+        win_width = self.root.winfo_width()
+        win_height = self.root.winfo_height()
+        
+        border_width = 5  # 边缘检测宽度
+        
+        on_left = abs(x - win_x) <= border_width
+        on_right = abs(x - (win_x + win_width)) <= border_width
+        on_top = abs(y - win_y) <= border_width
+        on_bottom = abs(y - (win_y + win_height)) <= border_width
+        
+        # 角落优先
+        if on_top and on_left:
+            return 'top_left'
+        elif on_top and on_right:
+            return 'top_right'
+        elif on_bottom and on_left:
+            return 'bottom_left'
+        elif on_bottom and on_right:
+            return 'bottom_right'
+        # 边缘
+        elif on_top:
+            return 'top'
+        elif on_bottom:
+            return 'bottom'
+        elif on_left:
+            return 'left'
+        elif on_right:
+            return 'right'
+        
+        return None
+    
     def on_window_move(self, event):
         """窗口移动事件"""
         if not self.is_dragging:
@@ -313,6 +494,27 @@ class DesktopTodoApp:
                     self.save_config()
                     if self.is_hidden:
                         self.show_window()
+    
+    def minimize_window(self):
+        """最小化窗口到系统托盘"""
+        self.hide_to_tray()
+    
+    def toggle_maximize(self):
+        """切换最大化/还原"""
+        if self.is_maximized:
+            # 还原窗口
+            if self.normal_geometry:
+                self.root.geometry(self.normal_geometry)
+            self.is_maximized = False
+            self.maximize_btn.config(text="□")
+        else:
+            # 最大化窗口
+            self.normal_geometry = self.root.geometry()
+            screen_width = self.root.winfo_screenwidth()
+            screen_height = self.root.winfo_screenheight()
+            self.root.geometry(f"{screen_width}x{screen_height}+0+0")
+            self.is_maximized = True
+            self.maximize_btn.config(text="❐")
     
     def move_to_screen_edge(self):
         """移动窗口到屏幕右侧边缘"""
@@ -650,8 +852,10 @@ class DesktopTodoApp:
             if new_text:
                 todo["text"] = new_text
                 self.save_data()
-                self.refresh_todo_list()
                 dialog.destroy()
+                # 强制刷新界面，确保布局正确更新
+                self.root.after(10, self.refresh_todo_list)
+                self.root.update_idletasks()
             else:
                 messagebox.showwarning("提示", "任务内容不能为空", parent=dialog)
         
@@ -706,88 +910,91 @@ class DesktopTodoApp:
     def start_drag_task(self, event, item_frame, todo_id):
         """开始拖拽任务"""
         self.dragging_task = todo_id
-        self.drag_task_start_y = event.y_root
-        # 改变拖拽项的样式
-        item_frame.config(relief=tk.RAISED, bd=2)
+        self.drag_start_index = self.get_task_index(todo_id)
+        
+        # 强烈的视觉反馈 - 黄色高亮
+        item_frame.config(relief=tk.RAISED, bd=4, bg="#ffeb3b", cursor="move")
     
     def on_drag_task(self, event, item_frame):
         """拖拽任务中"""
         if self.dragging_task is None:
             return
         
-        # 计算拖拽距离
-        delta_y = event.y_root - self.drag_task_start_y
+        # 获取鼠标相对于容器的Y坐标
+        container_y = self.todo_container.winfo_rooty()
+        mouse_y = event.y_root - container_y
         
         # 获取所有任务项
         all_items = [w for w in self.todo_container.winfo_children() 
                      if isinstance(w, tk.Frame) and hasattr(w, 'todo_id')]
         
-        if not all_items:
+        if len(all_items) <= 1:
             return
+        
+        # 找到鼠标位置对应的目标索引
+        target_index = 0
+        for i, item in enumerate(all_items):
+            item_y = item.winfo_y()
+            item_height = item.winfo_height()
+            if mouse_y > item_y + item_height / 2:
+                target_index = i + 1
+        
+        target_index = min(target_index, len(all_items) - 1)
         
         # 找到当前拖拽项的索引
-        drag_index = -1
+        current_index = -1
         for i, item in enumerate(all_items):
             if item.todo_id == self.dragging_task:
-                drag_index = i
+                current_index = i
                 break
         
-        if drag_index == -1:
-            return
-        
-        # 判断是否需要交换位置
-        if delta_y > 50 and drag_index < len(all_items) - 1:
-            # 向下移动
-            self.swap_task_display(drag_index, drag_index + 1)
-            self.drag_task_start_y = event.y_root
-        elif delta_y < -50 and drag_index > 0:
-            # 向上移动
-            self.swap_task_display(drag_index, drag_index - 1)
-            self.drag_task_start_y = event.y_root
+        # 如果位置改变，执行交换
+        if current_index != -1 and current_index != target_index:
+            self.move_task_to_position(current_index, target_index)
     
     def stop_drag_task(self, event, item_frame, todo_id):
         """停止拖拽任务"""
         if self.dragging_task is None:
             return
         
-        # 恢复样式
-        item_frame.config(relief=tk.SOLID, bd=1)
-        
         # 保存新的顺序
         self.save_task_order()
         
+        # 清除拖拽状态
         self.dragging_task = None
-        self.drag_task_start_y = 0
+        self.drag_start_index = -1
+        
+        # 刷新列表以恢复正常样式
+        self.refresh_todo_list()
     
-    def swap_task_display(self, index1, index2):
-        """交换两个任务的显示位置"""
-        all_items = [w for w in self.todo_container.winfo_children() 
-                     if isinstance(w, tk.Frame) and hasattr(w, 'todo_id')]
-        
-        if index1 < 0 or index2 < 0 or index1 >= len(all_items) or index2 >= len(all_items):
-            return
-        
-        # 获取两个任务的ID
-        todo_id1 = all_items[index1].todo_id
-        todo_id2 = all_items[index2].todo_id
-        
-        # 在数据中找到这两个任务
+    def get_task_index(self, todo_id):
+        """获取任务在当前分组中的索引"""
         group_todos = [t for t in self.todos if t.get("group", "默认分组") == self.current_group]
         sorted_group_todos = sorted(group_todos, key=lambda x: x.get("order", 0))
         
-        task1 = None
-        task2 = None
-        for todo in sorted_group_todos:
-            if todo["id"] == todo_id1:
-                task1 = todo
-            if todo["id"] == todo_id2:
-                task2 = todo
+        for i, todo in enumerate(sorted_group_todos):
+            if todo["id"] == todo_id:
+                return i
+        return -1
+    
+    def move_task_to_position(self, from_index, to_index):
+        """将任务从from_index移动到to_index"""
+        group_todos = [t for t in self.todos if t.get("group", "默认分组") == self.current_group]
+        sorted_group_todos = sorted(group_todos, key=lambda x: x.get("order", 0))
         
-        if task1 and task2:
-            # 交换order值
-            task1["order"], task2["order"] = task2["order"], task1["order"]
-            # 立即刷新显示
-            self.refresh_todo_list()
+        if from_index < 0 or to_index < 0 or from_index >= len(sorted_group_todos) or to_index >= len(sorted_group_todos):
+            return
+        
+        # 移动任务
+        task = sorted_group_todos.pop(from_index)
+        sorted_group_todos.insert(to_index, task)
+        
+        # 重新分配order值
+        for i, todo in enumerate(sorted_group_todos):
+            todo["order"] = i
+        
+        # 刷新显示
+        self.refresh_todo_list()
     
     def save_task_order(self):
         """保存任务顺序"""
@@ -906,17 +1113,18 @@ class DesktopTodoApp:
         text_fg = "#999" if todo["completed"] else "#333"
         
         text_frame = tk.Frame(item_frame, bg=item_frame["bg"])
-        text_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5, pady=8)
+        text_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
         
         # 使用Text组件支持超链接
         full_text = todo["text"]  # 保留完整文本用于超链接匹配
         display_text = full_text
-        if len(display_text) > 60:
-            display_text = display_text[:60] + "..."
+        # 增加显示字符数从50到100
+        if len(display_text) > 100:
+            display_text = display_text[:100] + "..."
         
         # 计算需要的高度
         lines = display_text.count('\n') + 1
-        height = min(lines, 3)
+        height = min(lines, 3)  # 增加最大行数从2到3
         
         task_text = tk.Text(text_frame,
                            font=text_style,
@@ -924,11 +1132,11 @@ class DesktopTodoApp:
                            bg=item_frame["bg"],
                            wrap=tk.WORD,
                            height=height,
-                           width=25,  # 限制宽度
+                           width=30,  # 增加宽度从20到30
                            relief=tk.FLAT,
                            cursor="hand2",
                            state=tk.NORMAL)
-        task_text.pack(anchor="w")
+        task_text.pack(anchor="w", fill=tk.X, expand=True)
         
         # 插入文本
         task_text.insert("1.0", display_text)
@@ -983,7 +1191,7 @@ class DesktopTodoApp:
         time_label.bind("<Double-Button-1>", lambda e, tid=todo["id"]: self.edit_task(tid))
         
         right_frame = tk.Frame(item_frame, bg=item_frame["bg"])
-        right_frame.pack(side=tk.RIGHT, padx=5)
+        right_frame.pack(side=tk.RIGHT, padx=2)
         
         # 获取当前分组的任务列表用于排序（按order排序后的）
         group_todos = [t for t in self.todos if t.get("group", "默认分组") == self.current_group]
@@ -999,35 +1207,34 @@ class DesktopTodoApp:
         if current_index_in_group > 0:
             up_btn = tk.Button(right_frame, text="↑",
                               command=lambda: self.move_task_up(todo["id"]),
-                              font=("微软雅黑", 10, "bold"),
+                              font=("微软雅黑", 9, "bold"),
                               fg="#2196F3",
                               bg=item_frame["bg"],
                               relief=tk.FLAT,
                               cursor="hand2",
-                              padx=5)
-            up_btn.pack(side=tk.LEFT)
+                              padx=3, pady=0)
+            up_btn.pack(side=tk.LEFT, padx=1)
         
         if current_index_in_group < len(sorted_group_todos) - 1:
             down_btn = tk.Button(right_frame, text="↓",
                                 command=lambda: self.move_task_down(todo["id"]),
-                                font=("微软雅黑", 10, "bold"),
+                                font=("微软雅黑", 9, "bold"),
                                 fg="#2196F3",
                                 bg=item_frame["bg"],
                                 relief=tk.FLAT,
                                 cursor="hand2",
-                                padx=5)
-            down_btn.pack(side=tk.LEFT)
+                                padx=3, pady=0)
+            down_btn.pack(side=tk.LEFT, padx=1)
         
-        delete_btn = tk.Button(right_frame, 
-                              text="✕",
+        delete_btn = tk.Button(right_frame, text="✕",
                               command=lambda: self.delete_task(todo["id"]),
-                              font=("微软雅黑", 12, "bold"),
+                              font=("微软雅黑", 9, "bold"),
                               fg="#f44336",
                               bg=item_frame["bg"],
                               relief=tk.FLAT,
                               cursor="hand2",
-                              padx=5)
-        delete_btn.pack(side=tk.LEFT, padx=(5, 0))
+                              padx=3, pady=0)
+        delete_btn.pack(side=tk.LEFT, padx=1)
     
     def load_data(self):
         """从文件加载数据"""
